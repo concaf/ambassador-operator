@@ -1,0 +1,92 @@
+language: go
+
+go:
+  - "1.13"
+
+env:
+  global:
+    - VERBOSE=1
+    - CI=travis
+    - IS_CI=true
+    - E2E_CLEANUP=true
+    - GO111MODULE=on
+    - GO15VENDOREXPERIMENT=1
+    - PUSH_CHART="true"
+
+cache:
+  directories:
+    - $HOME/.cache/go-build
+    - $HOME/gopath/pkg/mod
+
+##################################################################################################
+# build/lints/tests
+##################################################################################################
+
+install:
+  - export PATH=~/bin:$PATH
+  - make ci/setup
+
+jobs:
+  include:
+    # stage 1: lint, build and unit-tests
+    - stage: Build, lint and unit tests
+      name: "Build, lint and unit tests"
+      script: make ci/check-format-gen ci/lint ci/build ci/test
+
+    # stage 2: end-to-end tests in multiple clouds
+    # see the ci/infra/providers/CREDENTIALS.md for details on the credentials
+    - stage: End-to-end tests
+      name: "e2e tests in Google Cloud (GKE)"
+      if: type = cron
+      env: CLUSTER_PROVIDER="gke" CLUSTER_REUSE=1
+      script: make ci/cluster-setup ci/e2e
+
+    - name: "e2e tests in Azure (AKS)"
+      if: type = cron
+      env: CLUSTER_PROVIDER="azure" CLUSTER_REUSE=1
+      script: make ci/cluster-setup ci/e2e
+
+    - name: "e2e tests in a local (1 node) Kubernetes cluster (k3d)"
+      env: CLUSTER_PROVIDER="k3d"
+      script: make ci/cluster-setup ci/e2e
+
+after_script:
+  - make ci/cleanup
+
+##################################################################################################
+# deployment
+##################################################################################################
+
+# generate all the artifacts that will be published by the "deploy"
+before_deploy:
+  - make ci/release AMB_OPER_TAG="$TRAVIS_TAG"
+
+# ... and then publish those artifacts, docs, push images, etc.
+deploy:
+  # publish YAMLs to GitHub releases
+  # make ci/release should have left everything in build/artifacts/*
+  - provider: releases
+    api_key:
+      secure: IoJ7U+u8uM49mJgcpU1STwGWSgGPCzrqw8KMhajGvIWRSJJIMKe8aZoXZhCI61na42mbPkL72w4Ga4SIdoDMxBGg8u7j5Fl0BRcgpR04rxBb7bb8xahTGjwmCL91ncN4BvCwdB2sEt3/p7HEYaLiLyeKU3eGmCF7rMqvw7694JixlXFyAj4OLJ0knSnCE2Qj9qYqAZmaFo9gxKKLTf/aqYbDXTVF3yzxLmIubJAwBzGJIx/W5iFUk2ekhdeECMm8i0DNcMX5E+R0daVGzI06OdAT5UXenaaIgpdBQN2DuhaBrqHu3LYhkdBSm3De1gChcKjlzjVFY3jm4ys2KBpAITme0gSM75uzbxtg/1D0WGD6TDKctDsiYfJPkjD0WybN/unUCkoeYp+7ml/6gUDAZ2uUfWVm8UoCVKPE5Hqt2ZxycYjBg8uX2b62SXwoMzaGpMMCJ/hJRGHx4Gj/KApGCRGy2TnjBtNVvsfkfzKrYU/1h7CRARsj7QPR1/CIVp9532eSwo6qQfXcv47Juwr0v2bS3lP/18mAFQ5KUzOwBzHVJakHIGZKy+KZOezeIr8B+vA1Nc/ZWFIKG7c+lgCioS4zWgJSWgtOqTFlNOwzvkpPNAlxT2cJ9R2J3UWr680tDilfy6pzd2020VWwA6n2spqTndx4IwIEK+FvXbjOUzI=
+    file_glob: true
+    file: build/artifacts/*
+    skip_cleanup: true
+    on:
+      tags: true
+      branch: master
+  # publish docker images
+  # NOTE: make sure DOCKER_USERNAME/DOCKER_PASSWORD have values for a bot
+  #       (from https://quay.io/repository/datawire/ambassador-operator?tab=settings)
+  - provider: script
+    script: make ci/publish-image AMB_OPER_TAG="$TRAVIS_TAG"
+    skip_cleanup: true
+    on:
+      tags: true
+      branch: master
+  # publish helm chart
+  # NOTE: needs AWS_ACCESS_KEY_ID, AWS_BUCKET and AWS_SECRET_ACCESS_KEY (from keybase)
+  - provider: script
+    script: bash ./ci/push_chart.sh
+    on:
+      tags: true
+      branch: master
